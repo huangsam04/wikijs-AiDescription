@@ -1,0 +1,69 @@
+name: Auto Request AI Summary
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  request-ai-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed page names
+        id: get_pages
+        run: |
+          echo "==== Detecting changed .md/.html files ===="
+          page_names=""
+
+          for file in $(git diff --name-only ${{ github.event.before }} ${{ github.sha }}); do
+            echo "Checking file: $file"
+            if [[ "$file" == *.md || "$file" == *.html ]]; then
+              echo "  -> Matched: $file"
+              page_name="${file%.md}"
+              page_name="${page_name%.html}"
+              page_names="${page_names}\n${page_name}"
+            fi
+          done
+
+          echo "==== Final Page Name List ===="
+          echo -e "$page_names"
+
+          echo "PAGE_NAMES<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$page_names" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: No valid changes
+        if: steps.get_pages.outputs.PAGE_NAMES == ''
+        run: echo "No .md or .html changes detected. Skip request."
+
+      - name: Send request to AI Summary API (Streaming)
+        env:
+          AI_SUMMARY_ID: ${{ secrets.AI_SUMMARY }}
+        if: steps.get_pages.outputs.PAGE_NAMES != ''
+        run: |
+          while IFS= read -r page; do
+            if [[ -z "$page" ]]; then continue; fi
+            
+            encoded_page=$(echo -n "$page" | jq -sRr @uri)
+            request_url="https://nswiki.cn/${AI_SUMMARY_ID}/summary/${encoded_page}"
+            echo -e "\n==== Requesting: $request_url ===="
+            
+            curl -s "$request_url" | while IFS= read -r line; do
+                if [[ "$line" == data:* ]]; then
+                    CONTENT="${line#data: }"
+                    if [[ "$CONTENT" == "[DONE]" ]]; then
+                        echo "--- Stream finished for '$page' ---"
+                        break
+                    fi
+                    echo "$CONTENT"
+                fi
+            done
+            
+            echo -e "\n==== Request for '$page' completed ===="
+          done <<< "${{ steps.get_pages.outputs.PAGE_NAMES }}"
